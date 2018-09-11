@@ -575,6 +575,8 @@ class Mailer(object):
 
     def make_room_link(self, room_id):
         if self.hs.config.email_riot_base_url:
+            #base_url = self.hs.config.email_riot_base_url
+			#XXX: temporary fix for the broken Join room invitation link
             base_url = "%s/#/room" % (self.hs.config.email_riot_base_url)
         elif self.app_name == "Vector":
             # need /beta for Universal Links to work on iOS
