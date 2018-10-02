@@ -31,15 +31,15 @@ DELAY_BEFORE_MAIL_MS = 10 * 60 * 1000
 # Each room maintains its own throttle counter, but each new mail notification
 # sends the pending notifications for all rooms.
 THROTTLE_START_MS = 10 * 60 * 1000
-THROTTLE_MAX_MS = 4 * 60 * 60 * 1000  # 24h
-THROTTLE_MULTIPLIER = 6              # 10 mins, 1 hour, 6 hours, 24 hours
+THROTTLE_MAX_MS = 2 * 60 * 60 * 1000  # 24h
+THROTTLE_MULTIPLIER = 1              # 10 mins, 1 hour, 6 hours, 24 hours
 # THROTTLE_MULTIPLIER = 144              # 10 mins, 24 hours - i.e. jump straight to 1 day
 
 # If no event triggers a notification for this long after the previous,
 # the throttle is released.
 # 12 hours - a gap of 12 hours in conversation is surely enough to merit a new
 # notification when things get going again...
-THROTTLE_RESET_AFTER_MS = (4 * 60 * 60 * 1000)
+THROTTLE_RESET_AFTER_MS = (2 * 60 * 60 * 1000)
 
 # does each email include all unread notifs, or just the ones which have happened
 # since the last mail?
