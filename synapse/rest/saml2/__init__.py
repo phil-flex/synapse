@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2014-2016 OpenMarket Ltd
+# Copyright 2018 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,15 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 
-import sys
+from twisted.web.resource import Resource
 
-from synapse import python_dependencies  # noqa: E402
+from synapse.rest.saml2.metadata_resource import SAML2MetadataResource
+from synapse.rest.saml2.response_resource import SAML2ResponseResource
 
-sys.dont_write_bytecode = True
+logger = logging.getLogger(__name__)
 
-try:
-    python_dependencies.check_requirements()
-except python_dependencies.DependencyException as e:
-    sys.stderr.writelines(e.message)
-    sys.exit(1)
+
+class SAML2Resource(Resource):
+    def __init__(self, hs):
+        Resource.__init__(self)
+        self.putChild(b"metadata.xml", SAML2MetadataResource(hs))
+        self.putChild(b"authn_response", SAML2ResponseResource(hs))
