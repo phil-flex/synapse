@@ -15,17 +15,35 @@
 
 import gc
 import logging
+import signal
 import sys
+import traceback
 
 import psutil
 from daemonize import Daemonize
 
 from twisted.internet import error, reactor
+from twisted.protocols.tls import TLSMemoryBIOFactory
 
+from synapse.app import check_bind_error
+from synapse.crypto import context_factory
 from synapse.util import PreserveLoggingContext
 from synapse.util.rlimit import change_resource_limit
 
 logger = logging.getLogger(__name__)
+
+_sighup_callbacks = []
+
+
+def register_sighup(func):
+    """
+    Register a function to be called when a SIGHUP occurs.
+
+    Args:
+        func (function): Function to be called when sent a SIGHUP signal.
+            Will be called with a single argument, the homeserver.
+    """
+    _sighup_callbacks.append(func)
 
 
 def start_worker_reactor(appname, config):
@@ -135,62 +153,126 @@ def listen_metrics(bind_addresses, port):
     from prometheus_client import start_http_server
 
     for host in bind_addresses:
-        reactor.callInThread(start_http_server, int(port),
-                             addr=host, registry=RegistryProxy)
-        logger.info("Metrics now reporting on %s:%d", host, port)
+        logger.info("Starting metrics listener on %s:%d", host, port)
+        start_http_server(port, addr=host, registry=RegistryProxy)
 
 
 def listen_tcp(bind_addresses, port, factory, reactor=reactor, backlog=50):
     """
     Create a TCP socket for a port and several addresses
+
+    Returns:
+        list[twisted.internet.tcp.Port]: listening for TCP connections
     """
+    r = []
     for address in bind_addresses:
         try:
-            reactor.listenTCP(
-                port,
-                factory,
-                backlog,
-                address
+            r.append(
+                reactor.listenTCP(
+                    port,
+                    factory,
+                    backlog,
+                    address
+                )
             )
         except error.CannotListenError as e:
             check_bind_error(e, address, bind_addresses)
+
+    return r
 
 
 def listen_ssl(
     bind_addresses, port, factory, context_factory, reactor=reactor, backlog=50
 ):
     """
-    Create an SSL socket for a port and several addresses
+    Create an TLS-over-TCP socket for a port and several addresses
+
+    Returns:
+        list of twisted.internet.tcp.Port listening for TLS connections
     """
+    r = []
     for address in bind_addresses:
         try:
-            reactor.listenSSL(
-                port,
-                factory,
-                context_factory,
-                backlog,
-                address
+            r.append(
+                reactor.listenSSL(
+                    port,
+                    factory,
+                    context_factory,
+                    backlog,
+                    address
+                )
             )
         except error.CannotListenError as e:
             check_bind_error(e, address, bind_addresses)
 
+    return r
 
-def check_bind_error(e, address, bind_addresses):
+
+def refresh_certificate(hs):
     """
-    This method checks an exception occurred while binding on 0.0.0.0.
-    If :: is specified in the bind addresses a warning is shown.
-    The exception is still raised otherwise.
+    Refresh the TLS certificates that Synapse is using by re-reading them from
+    disk and updating the TLS context factories to use them.
+    """
 
-    Binding on both 0.0.0.0 and :: causes an exception on Linux and macOS
-    because :: binds on both IPv4 and IPv6 (as per RFC 3493).
-    When binding on 0.0.0.0 after :: this can safely be ignored.
+    if not hs.config.has_tls_listener():
+        # attempt to reload the certs for the good of the tls_fingerprints
+        hs.config.read_certificate_from_disk(require_cert_and_key=False)
+        return
+
+    hs.config.read_certificate_from_disk(require_cert_and_key=True)
+    hs.tls_server_context_factory = context_factory.ServerContextFactory(hs.config)
+
+    if hs._listening_services:
+        logger.info("Updating context factories...")
+        for i in hs._listening_services:
+            # When you listenSSL, it doesn't make an SSL port but a TCP one with
+            # a TLS wrapping factory around the factory you actually want to get
+            # requests. This factory attribute is public but missing from
+            # Twisted's documentation.
+            if isinstance(i.factory, TLSMemoryBIOFactory):
+                addr = i.getHost()
+                logger.info(
+                    "Replacing TLS context factory on [%s]:%i", addr.host, addr.port,
+                )
+                # We want to replace TLS factories with a new one, with the new
+                # TLS configuration. We do this by reaching in and pulling out
+                # the wrappedFactory, and then re-wrapping it.
+                i.factory = TLSMemoryBIOFactory(
+                    hs.tls_server_context_factory,
+                    False,
+                    i.factory.wrappedFactory
+                )
+        logger.info("Context factories updated.")
+
+
+def start(hs, listeners=None):
+    """
+    Start a Synapse server or worker.
 
     Args:
-        e (Exception): Exception that was caught.
-        address (str): Address on which binding was attempted.
-        bind_addresses (list): Addresses on which the service listens.
+        hs (synapse.server.HomeServer)
+        listeners (list[dict]): Listener configuration ('listeners' in homeserver.yaml)
     """
-    if address == '0.0.0.0' and '::' in bind_addresses:
-        logger.warn('Failed to listen on 0.0.0.0, continuing because listening on [::]')
-    else:
-        raise e
+    try:
+        # Set up the SIGHUP machinery.
+        if hasattr(signal, "SIGHUP"):
+            def handle_sighup(*args, **kwargs):
+                for i in _sighup_callbacks:
+                    i(hs)
+
+            signal.signal(signal.SIGHUP, handle_sighup)
+
+            register_sighup(refresh_certificate)
+
+        # Load the certificate from disk.
+        refresh_certificate(hs)
+
+        # It is now safe to start your Synapse.
+        hs.start_listening(listeners)
+        hs.get_datastore().start_profiling()
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        reactor = hs.get_reactor()
+        if reactor.running:
+            reactor.stop()
+        sys.exit(1)

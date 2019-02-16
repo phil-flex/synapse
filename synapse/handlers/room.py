@@ -123,9 +123,12 @@ class RoomCreationHandler(BaseHandler):
                     token_id=requester.access_token_id,
                 )
             )
-            yield self.auth.check_from_context(tombstone_event, tombstone_context)
+            old_room_version = yield self.store.get_room_version(old_room_id)
+            yield self.auth.check_from_context(
+                old_room_version, tombstone_event, tombstone_context,
+            )
 
-            yield self.clone_exiting_room(
+            yield self.clone_existing_room(
                 requester,
                 old_room_id=old_room_id,
                 new_room_id=new_room_id,
@@ -230,7 +233,7 @@ class RoomCreationHandler(BaseHandler):
         )
 
     @defer.inlineCallbacks
-    def clone_exiting_room(
+    def clone_existing_room(
             self, requester, old_room_id, new_room_id, new_room_version,
             tombstone_event_id,
     ):
@@ -260,8 +263,19 @@ class RoomCreationHandler(BaseHandler):
             }
         }
 
+        # Check if old room was non-federatable
+
+        # Get old room's create event
+        old_room_create_event = yield self.store.get_create_event_for_room(old_room_id)
+
+        # Check if the create event specified a non-federatable room
+        if not old_room_create_event.content.get("m.federate", True):
+            # If so, mark the new room as non-federatable as well
+            creation_content["m.federate"] = False
+
         initial_state = dict()
 
+        # Replicate relevant room events
         types_to_copy = (
             (EventTypes.JoinRules, ""),
             (EventTypes.Name, ""),
@@ -269,6 +283,8 @@ class RoomCreationHandler(BaseHandler):
             (EventTypes.RoomHistoryVisibility, ""),
             (EventTypes.GuestAccess, ""),
             (EventTypes.RoomAvatar, ""),
+            (EventTypes.Encryption, ""),
+            (EventTypes.ServerACL, ""),
         )
 
         old_room_state_ids = yield self.store.get_filtered_current_state_ids(
@@ -433,7 +449,7 @@ class RoomCreationHandler(BaseHandler):
         """
         user_id = requester.user.to_string()
 
-        self.auth.check_auth_blocking(user_id)
+        yield self.auth.check_auth_blocking(user_id)
 
         if not self.spam_checker.user_may_create_room(user_id):
             raise SynapseError(403, "You are not permitted to create rooms")

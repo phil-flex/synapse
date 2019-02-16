@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright 2019 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +14,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from __future__ import print_function
+
 import gc
 import logging
 import os
@@ -25,6 +29,7 @@ from prometheus_client import Gauge
 
 from twisted.application import service
 from twisted.internet import defer, reactor
+from twisted.python.failure import Failure
 from twisted.web.resource import EncodingResourceWrapper, NoResource
 from twisted.web.server import GzipEncoderFactory
 from twisted.web.static import File
@@ -45,7 +50,6 @@ from synapse.app import _base
 from synapse.app._base import listen_ssl, listen_tcp, quit_with_error
 from synapse.config._base import ConfigError
 from synapse.config.homeserver import HomeServerConfig
-from synapse.crypto import context_factory
 from synapse.federation.transport.server import TransportLayerServer
 from synapse.http.additional_resource import AdditionalResource
 from synapse.http.server import RootRedirect
@@ -60,6 +64,7 @@ from synapse.replication.tcp.resource import ReplicationStreamProtocolFactory
 from synapse.rest import ClientRestResource
 from synapse.rest.key.v2 import KeyApiV2Resource
 from synapse.rest.media.v0.content_repository import ContentRepoResource
+from synapse.rest.well_known import WellKnownResource
 from synapse.server import HomeServer
 from synapse.storage import DataStore, are_all_users_on_domain
 from synapse.storage.engines import IncorrectDatabaseSetup, create_engine
@@ -88,12 +93,13 @@ class SynapseHomeServer(HomeServer):
         tls = listener_config.get("tls", False)
         site_tag = listener_config.get("tag", port)
 
-        if tls and config.no_tls:
-            return
-
         resources = {}
         for res in listener_config["resources"]:
             for name in res["names"]:
+                if name == "openid" and "federation" in res["names"]:
+                    # Skip loading openid resource if federation is defined
+                    # since federation resource will include openid
+                    continue
                 resources.update(self._configure_named_resource(
                     name, res.get("compress", False),
                 ))
@@ -118,7 +124,7 @@ class SynapseHomeServer(HomeServer):
         root_resource = create_resource_tree(resources, root_resource)
 
         if tls:
-            listen_ssl(
+            ports = listen_ssl(
                 bind_addresses,
                 port,
                 SynapseSite(
@@ -129,10 +135,12 @@ class SynapseHomeServer(HomeServer):
                     self.version_string,
                 ),
                 self.tls_server_context_factory,
+                reactor=self.get_reactor(),
             )
+            logger.info("Synapse now listening on TCP port %d (TLS)", port)
 
         else:
-            listen_tcp(
+            ports = listen_tcp(
                 bind_addresses,
                 port,
                 SynapseSite(
@@ -141,9 +149,12 @@ class SynapseHomeServer(HomeServer):
                     listener_config,
                     root_resource,
                     self.version_string,
-                )
+                ),
+                reactor=self.get_reactor(),
             )
-        logger.info("Synapse now listening on port %d", port)
+            logger.info("Synapse now listening on TCP port %d", port)
+
+        return ports
 
     def _configure_named_resource(self, name, compress=False):
         """Build a resource map for a named resource
@@ -168,7 +179,12 @@ class SynapseHomeServer(HomeServer):
                 "/_matrix/client/unstable": client_resource,
                 "/_matrix/client/v2_alpha": client_resource,
                 "/_matrix/client/versions": client_resource,
+                "/.well-known/matrix/client": WellKnownResource(self),
             })
+
+            if self.get_config().saml2_enabled:
+                from synapse.rest.saml2 import SAML2Resource
+                resources["/_matrix/saml2"] = SAML2Resource(self)
 
         if name == "consent":
             from synapse.rest.consent.consent_resource import ConsentResource
@@ -182,6 +198,11 @@ class SynapseHomeServer(HomeServer):
         if name == "federation":
             resources.update({
                 FEDERATION_PREFIX: TransportLayerServer(self),
+            })
+
+        if name == "openid":
+            resources.update({
+                FEDERATION_PREFIX: TransportLayerServer(self, servlet_groups=["openid"]),
             })
 
         if name in ["static", "client"]:
@@ -229,12 +250,14 @@ class SynapseHomeServer(HomeServer):
 
         return resources
 
-    def start_listening(self):
+    def start_listening(self, listeners):
         config = self.get_config()
 
-        for listener in config.listeners:
+        for listener in listeners:
             if listener["type"] == "http":
-                self._listener_http(config, listener)
+                self._listening_services.extend(
+                    self._listener_http(config, listener)
+                )
             elif listener["type"] == "manhole":
                 listen_tcp(
                     listener["bind_addresses"],
@@ -246,14 +269,14 @@ class SynapseHomeServer(HomeServer):
                     )
                 )
             elif listener["type"] == "replication":
-                bind_addresses = listener["bind_addresses"]
-                for address in bind_addresses:
-                    factory = ReplicationStreamProtocolFactory(self)
-                    server_listener = reactor.listenTCP(
-                        listener["port"], factory, interface=address
-                    )
+                services = listen_tcp(
+                    listener["bind_addresses"],
+                    listener["port"],
+                    ReplicationStreamProtocolFactory(self),
+                )
+                for s in services:
                     reactor.addSystemEventTrigger(
-                        "before", "shutdown", server_listener.stopListening,
+                        "before", "shutdown", s.stopListening,
                     )
             elif listener["type"] == "metrics":
                 if not self.get_config().enable_metrics:
@@ -314,15 +337,12 @@ def setup(config_options):
         # generating config files and shouldn't try to continue.
         sys.exit(0)
 
-    synapse.config.logger.setup_logging(config, use_worker_options=False)
-
-    # check any extra requirements we have now we have a config
-    check_requirements(config)
+    synapse.config.logger.setup_logging(
+        config,
+        use_worker_options=False
+    )
 
     events.USE_FROZEN_DICTS = config.use_frozen_dicts
-
-    tls_server_context_factory = context_factory.ServerContextFactory(config)
-    tls_client_options_factory = context_factory.ClientTLSOptionsFactory(config)
 
     database_engine = create_engine(config.database_config)
     config.database_config["args"]["cp_openfun"] = database_engine.on_new_connection
@@ -330,8 +350,6 @@ def setup(config_options):
     hs = SynapseHomeServer(
         config.server_name,
         db_config=config.database_config,
-        tls_server_context_factory=tls_server_context_factory,
-        tls_client_options_factory=tls_client_options_factory,
         config=config,
         version_string="Synapse/" + get_version_string(synapse),
         database_engine=database_engine,
@@ -358,12 +376,79 @@ def setup(config_options):
     logger.info("Database prepared in %s.", config.database_config['name'])
 
     hs.setup()
-    hs.start_listening()
 
+    @defer.inlineCallbacks
+    def do_acme():
+        """
+        Reprovision an ACME certificate, if it's required.
+
+        Returns:
+            Deferred[bool]: Whether the cert has been updated.
+        """
+        acme = hs.get_acme_handler()
+
+        # Check how long the certificate is active for.
+        cert_days_remaining = hs.config.is_disk_cert_valid(
+            allow_self_signed=False
+        )
+
+        # We want to reprovision if cert_days_remaining is None (meaning no
+        # certificate exists), or the days remaining number it returns
+        # is less than our re-registration threshold.
+        provision = False
+
+        if (
+            cert_days_remaining is None or
+            cert_days_remaining < hs.config.acme_reprovision_threshold
+        ):
+            provision = True
+
+        if provision:
+            yield acme.provision_certificate()
+
+        defer.returnValue(provision)
+
+    @defer.inlineCallbacks
+    def reprovision_acme():
+        """
+        Provision a certificate from ACME, if required, and reload the TLS
+        certificate if it's renewed.
+        """
+        reprovisioned = yield do_acme()
+        if reprovisioned:
+            _base.refresh_certificate(hs)
+
+    @defer.inlineCallbacks
     def start():
-        hs.get_pusherpool().start()
-        hs.get_datastore().start_profiling()
-        hs.get_datastore().start_doing_background_updates()
+        try:
+            # Run the ACME provisioning code, if it's enabled.
+            if hs.config.acme_enabled:
+                acme = hs.get_acme_handler()
+                # Start up the webservices which we will respond to ACME
+                # challenges with, and then provision.
+                yield acme.start_listening()
+                yield do_acme()
+
+                # Check if it needs to be reprovisioned every day.
+                hs.get_clock().looping_call(
+                    reprovision_acme,
+                    24 * 60 * 60 * 1000
+                )
+
+            _base.start(hs, config.listeners)
+
+            hs.get_pusherpool().start()
+            hs.get_datastore().start_doing_background_updates()
+        except Exception:
+            # Print the exception and bail out.
+            print("Error during startup:", file=sys.stderr)
+
+            # this gives better tracebacks than traceback.print_exc()
+            Failure().printTraceback(file=sys.stderr)
+
+            if reactor.running:
+                reactor.stop()
+            sys.exit(1)
 
     reactor.callWhenRunning(start)
 
@@ -371,7 +456,8 @@ def setup(config_options):
 
 
 class SynapseService(service.Service):
-    """A twisted Service class that will start synapse. Used to run synapse
+    """
+    A twisted Service class that will start synapse. Used to run synapse
     via twistd and a .tac.
     """
     def __init__(self, config):
@@ -531,7 +617,7 @@ def run(hs):
         )
 
     start_generate_monthly_active_users()
-    if hs.config.limit_usage_by_mau:
+    if hs.config.limit_usage_by_mau or hs.config.mau_stats_only:
         clock.looping_call(start_generate_monthly_active_users, 5 * 60 * 1000)
     # End of monthly active user settings
 

@@ -26,7 +26,6 @@ from synapse.app import _base
 from synapse.config._base import ConfigError
 from synapse.config.homeserver import HomeServerConfig
 from synapse.config.logger import setup_logging
-from synapse.crypto import context_factory
 from synapse.federation.transport.server import TransportLayerServer
 from synapse.http.site import SynapseSite
 from synapse.metrics import RegistryProxy
@@ -87,6 +86,16 @@ class FederationReaderServer(HomeServer):
                     resources.update({
                         FEDERATION_PREFIX: TransportLayerServer(self),
                     })
+                if name == "openid" and "federation" not in res["names"]:
+                    # Only load the openid resource separately if federation resource
+                    # is not specified since federation resource includes openid
+                    # resource.
+                    resources.update({
+                        FEDERATION_PREFIX: TransportLayerServer(
+                            self,
+                            servlet_groups=["openid"],
+                        ),
+                    })
 
         root_resource = create_resource_tree(resources, NoResource())
 
@@ -99,7 +108,8 @@ class FederationReaderServer(HomeServer):
                 listener_config,
                 root_resource,
                 self.version_string,
-            )
+            ),
+            reactor=self.get_reactor()
         )
 
         logger.info("Synapse federation reader now listening on port %d", port)
@@ -151,26 +161,16 @@ def start(config_options):
 
     database_engine = create_engine(config.database_config)
 
-    tls_server_context_factory = context_factory.ServerContextFactory(config)
-    tls_client_options_factory = context_factory.ClientTLSOptionsFactory(config)
-
     ss = FederationReaderServer(
         config.server_name,
         db_config=config.database_config,
-        tls_server_context_factory=tls_server_context_factory,
-        tls_client_options_factory=tls_client_options_factory,
         config=config,
         version_string="Synapse/" + get_version_string(synapse),
         database_engine=database_engine,
     )
 
     ss.setup()
-    ss.start_listening(config.worker_listeners)
-
-    def start():
-        ss.get_datastore().start_profiling()
-
-    reactor.callWhenRunning(start)
+    reactor.callWhenRunning(_base.start, ss, config.worker_listeners)
 
     _base.start_worker_reactor("synapse-federation-reader", config)
 

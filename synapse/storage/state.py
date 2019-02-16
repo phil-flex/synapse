@@ -428,14 +428,54 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
         """
         # for now we do this by looking at the create event. We may want to cache this
         # more intelligently in future.
+
+        # Retrieve the room's create event
+        create_event = yield self.get_create_event_for_room(room_id)
+        defer.returnValue(create_event.content.get("room_version", "1"))
+
+    @defer.inlineCallbacks
+    def get_room_predecessor(self, room_id):
+        """Get the predecessor room of an upgraded room if one exists.
+        Otherwise return None.
+
+        Args:
+            room_id (str)
+
+        Returns:
+            Deferred[unicode|None]: predecessor room id
+
+        Raises:
+            NotFoundError if the room is unknown
+        """
+        # Retrieve the room's create event
+        create_event = yield self.get_create_event_for_room(room_id)
+
+        # Return predecessor if present
+        defer.returnValue(create_event.content.get("predecessor", None))
+
+    @defer.inlineCallbacks
+    def get_create_event_for_room(self, room_id):
+        """Get the create state event for a room.
+
+        Args:
+            room_id (str)
+
+        Returns:
+            Deferred[EventBase]: The room creation event.
+
+        Raises:
+            NotFoundError if the room is unknown
+        """
         state_ids = yield self.get_current_state_ids(room_id)
         create_id = state_ids.get((EventTypes.Create, ""))
 
+        # If we can't find the create event, assume we've hit a dead end
         if not create_id:
-            raise NotFoundError("Unknown room")
+            raise NotFoundError("Unknown room %s" % (room_id))
 
+        # Retrieve the room's create event and return
         create_event = yield self.get_event(create_id)
-        defer.returnValue(create_event.content.get("room_version", "1"))
+        defer.returnValue(create_event)
 
     @cached(max_entries=100000, iterable=True)
     def get_current_state_ids(self, room_id):
