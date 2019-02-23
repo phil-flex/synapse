@@ -6,11 +6,11 @@
                     <img alt="" class="sender_avatar" src="{{ message.sender_avatar_url|mxc_to_http(32,32) }}"  />
                 {% else %}
                     {% if message.sender_hash % 3 == 0 %}
-                        <img class="sender_avatar" src="https://vector.im/beta/img/76cfa6.png"  />
+                        <img class="sender_avatar" src="https://ui-avatars.com/api/?background=76cfa6&name={{ message.sender_name }}"  />
                     {% elif message.sender_hash % 3 == 1 %}
-                        <img class="sender_avatar" src="https://vector.im/beta/img/50e2c2.png"  />
+                        <img class="sender_avatar" src="https://ui-avatars.com/api/?background=50e2c2&name={{ message.sender_name }}"  />
                     {% else %}
-                        <img class="sender_avatar" src="https://vector.im/beta/img/f4c371.png"  />
+                        <img class="sender_avatar" src="https://ui-avatars.com/api/?background=f4c371&name={{ message.sender_name }}"  />
                     {% endif %}
                 {% endif %}
             {% endif %}
