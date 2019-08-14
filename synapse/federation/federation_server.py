@@ -42,6 +42,8 @@ from synapse.federation.federation_base import FederationBase, event_from_pdu_js
 from synapse.federation.persistence import TransactionActions
 from synapse.federation.units import Edu, Transaction
 from synapse.http.endpoint import parse_server_name
+from synapse.logging.context import nested_logging_context
+from synapse.logging.utils import log_function
 from synapse.replication.http.federation import (
     ReplicationFederationSendEduRestServlet,
     ReplicationGetQueryRestServlet,
@@ -50,8 +52,6 @@ from synapse.types import get_domain_from_id
 from synapse.util import glob_to_regex
 from synapse.util.async_helpers import Linearizer, concurrently_execute
 from synapse.util.caches.response_cache import ResponseCache
-from synapse.util.logcontext import nested_logging_context
-from synapse.util.logutils import log_function
 
 # when processing incoming transactions, we try to handle multiple rooms in
 # parallel, up to this limit.
@@ -369,7 +369,7 @@ class FederationServer(FederationBase):
             logger.warn("Room version %s not in %s", room_version, supported_versions)
             raise IncompatibleRoomVersionError(room_version=room_version)
 
-        pdu = yield self.handler.on_make_join_request(room_id, user_id)
+        pdu = yield self.handler.on_make_join_request(origin, room_id, user_id)
         time_now = self._clock.time_msec()
         defer.returnValue(
             {"event": pdu.get_pdu_json(time_now), "room_version": room_version}
@@ -423,7 +423,7 @@ class FederationServer(FederationBase):
     def on_make_leave_request(self, origin, room_id, user_id):
         origin_host, _ = parse_server_name(origin)
         yield self.check_server_matches_acl(origin_host, room_id)
-        pdu = yield self.handler.on_make_leave_request(room_id, user_id)
+        pdu = yield self.handler.on_make_leave_request(origin, room_id, user_id)
 
         room_version = yield self.store.get_room_version(room_id)
 
