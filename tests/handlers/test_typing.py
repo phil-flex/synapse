@@ -111,7 +111,9 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
             retry_timings_res
         )
 
-        self.datastore.get_device_updates_by_remote.return_value = (0, [])
+        self.datastore.get_device_updates_by_remote.return_value = defer.succeed(
+            (0, [])
+        )
 
         def get_received_txn_response(*args):
             return defer.succeed(None)
@@ -120,11 +122,11 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         self.room_members = []
 
-        def check_joined_room(room_id, user_id):
+        def check_user_in_room(room_id, user_id):
             if user_id not in [u.to_string() for u in self.room_members]:
                 raise AuthError(401, "User is not in the room")
 
-        hs.get_auth().check_joined_room = check_joined_room
+        hs.get_auth().check_user_in_room = check_user_in_room
 
         def get_joined_hosts_for_room(room_id):
             return set(member.domain for member in self.room_members)
@@ -144,7 +146,9 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
         self.datastore.get_current_state_deltas.return_value = (0, None)
 
         self.datastore.get_to_device_stream_token = lambda: 0
-        self.datastore.get_new_device_msgs_for_remote = lambda *args, **kargs: ([], 0)
+        self.datastore.get_new_device_msgs_for_remote = lambda *args, **kargs: defer.succeed(
+            ([], 0)
+        )
         self.datastore.delete_device_msgs_for_remote = lambda *args, **kargs: None
         self.datastore.set_received_txn_response = lambda *args, **kwargs: defer.succeed(
             None

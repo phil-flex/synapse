@@ -99,7 +99,9 @@ class MessageHandler(object):
         (
             membership,
             membership_event_id,
-        ) = yield self.auth.check_in_room_or_world_readable(room_id, user_id)
+        ) = yield self.auth.check_user_in_room_or_world_readable(
+            room_id, user_id, allow_departed_users=True
+        )
 
         if membership == Membership.JOIN:
             data = yield self.state.get_current_state(room_id, event_type, state_key)
@@ -177,7 +179,9 @@ class MessageHandler(object):
             (
                 membership,
                 membership_event_id,
-            ) = yield self.auth.check_in_room_or_world_readable(room_id, user_id)
+            ) = yield self.auth.check_user_in_room_or_world_readable(
+                room_id, user_id, allow_departed_users=True
+            )
 
             if membership == Membership.JOIN:
                 state_ids = yield self.store.get_filtered_current_state_ids(
@@ -216,8 +220,8 @@ class MessageHandler(object):
         if not requester.app_service:
             # We check AS auth after fetching the room membership, as it
             # requires us to pull out all joined members anyway.
-            membership, _ = yield self.auth.check_in_room_or_world_readable(
-                room_id, user_id
+            membership, _ = yield self.auth.check_user_in_room_or_world_readable(
+                room_id, user_id, allow_departed_users=True
             )
             if membership != Membership.JOIN:
                 raise NotImplementedError(
@@ -932,10 +936,9 @@ class EventCreationHandler(object):
                     # way? If we have been invited by a remote server, we need
                     # to get them to sign the event.
 
-                    returned_invite = yield federation_handler.send_invite(
-                        invitee.domain, event
+                    returned_invite = yield defer.ensureDeferred(
+                        federation_handler.send_invite(invitee.domain, event)
                     )
-
                     event.unsigned.pop("room_state", None)
 
                     # TODO: Make sure the signatures actually are correct.
