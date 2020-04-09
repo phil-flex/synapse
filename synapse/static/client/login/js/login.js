@@ -15,7 +15,7 @@ var submitPassword = function(user, pwd) {
     $.post(matrixLogin.endpoint, JSON.stringify(data), function(response) {
         show_login();
         matrixLogin.onLogin(response);
-    }).error(errorFunc);
+    }).fail(errorFunc);
 };
 
 var submitToken = function(loginToken) {
@@ -27,7 +27,7 @@ var submitToken = function(loginToken) {
     $.post(matrixLogin.endpoint, JSON.stringify(data), function(response) {
         show_login();
         matrixLogin.onLogin(response);
-    }).error(errorFunc);
+    }).fail(errorFunc);
 };
 
 var errorFunc = function(err) {
@@ -96,7 +96,7 @@ var fetch_info = function(cb) {
         }
 
         cb();
-    }).error(errorFunc);
+    }).fail(errorFunc);
 }
 
 matrixLogin.onLoad = function() {
